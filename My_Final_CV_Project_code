@@ -1,0 +1,455 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+# ============================================================
+# Saree Recommendation System
+# CV-Dominant Recommendation + Top-K Evaluation
+# ============================================================
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+import cv2
+import numpy as np
+
+
+# In[2]:
+
+
+# ============================================================
+# 1. Load CSV file
+# ============================================================
+
+csv_path = r"C:\Users\Acer\OneDrive - University of Oklahoma\PhD in OU\Semester\Spring 2026\Computer Vision\Homeworks\Project\Datasets\sarees1.csv"
+
+df = pd.read_csv(csv_path, encoding="utf-8-sig")
+
+# remove empty rows and extra unnamed columns
+df = df.dropna(how="all")
+df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+df = df.fillna("")
+
+# lowercase text columns
+text_cols = ["primary_color", "secondary_color", "style", "transparency", "occasion", "mood"]
+
+for col in text_cols:
+    df[col] = df[col].astype(str).str.lower()
+
+print("CSV loaded successfully!")
+print("Total sarees:", len(df))
+display(df)
+
+
+# In[3]:
+
+
+# ============================================================
+# 2. OpenCV Feature Extraction
+# ============================================================
+
+def extract_features(image_path):
+    if not os.path.exists(image_path):
+        return None
+
+    img = cv2.imread(image_path)
+
+    if img is None:
+        return None
+
+    img = cv2.resize(img, (200, 200))
+
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Feature 1: brightness
+    brightness = np.mean(gray)
+
+    # Feature 2: texture
+    texture = np.std(gray)
+
+    # Feature 3: average color
+    avg_color = img.mean(axis=(0, 1))  # BGR format
+
+    return {
+        "brightness": brightness,
+        "texture": texture,
+        "avg_color": avg_color
+    }
+
+
+# In[4]:
+
+
+# ============================================================
+# 3. Extract features for all sarees
+# ============================================================
+
+features_dict = {}
+
+for _, row in df.iterrows():
+    item_id = row["item_id"]
+    image_path = row["image_main"]
+
+    features = extract_features(image_path)
+
+    if features is not None:
+        features_dict[item_id] = features
+
+print("Feature extraction completed!")
+print("Total extracted:", len(features_dict))
+
+for item_id, features in features_dict.items():
+    print(
+        item_id,
+        "Brightness:", round(features["brightness"], 2),
+        "Texture:", round(features["texture"], 2)
+    )
+
+
+# In[5]:
+
+
+# ============================================================
+# 4. CV-Dominant Mood Scoring
+# ============================================================
+
+def cv_dominant_mood_score(user_mood, brightness, texture):
+    user_mood = user_mood.lower().strip()
+    score = 0
+
+    # Happy / festive: bright + detailed
+    if user_mood in ["happy", "festive", "cheerful"]:
+        score += brightness / 255 * 6
+        score += min(texture / 80, 1) * 4
+
+    # Calm / soft / elegant: balanced brightness + lower texture
+    elif user_mood in ["calm", "soft", "relaxed", "elegant"]:
+        brightness_score = 6 - abs(brightness - 150) / 25
+        texture_score = 4 - texture / 20
+
+        score += max(brightness_score, 0)
+        score += max(texture_score, 0)
+
+    # Bold / rich / royal / glamorous: darker + more textured
+    elif user_mood in ["bold", "rich", "royal", "glamorous"]:
+        darkness_score = (255 - brightness) / 255 * 6
+        texture_score = min(texture / 80, 1) * 4
+
+        score += darkness_score
+        score += texture_score
+
+    return score
+
+
+# In[6]:
+
+
+# ============================================================
+# 5. CV-Dominant Recommendation Function
+# ============================================================
+
+def recommend_sarees_cv_dominant(user_occasion="", user_mood="", user_color="", top_k=3):
+    user_occasion = user_occasion.lower().strip()
+    user_mood = user_mood.lower().strip()
+    user_color = user_color.lower().strip()
+
+    final_scores = []
+    cv_scores = []
+    metadata_scores = []
+    brightness_values = []
+    texture_values = []
+
+    for _, row in df.iterrows():
+        item_id = row["item_id"]
+
+        # -----------------------------
+        # CV score: main score
+        # -----------------------------
+        if item_id in features_dict:
+            brightness = features_dict[item_id]["brightness"]
+            texture = features_dict[item_id]["texture"]
+            cv_score = cv_dominant_mood_score(user_mood, brightness, texture)
+        else:
+            brightness = 0
+            texture = 0
+            cv_score = 0
+
+        # -----------------------------
+        # Metadata score: small bonus
+        # -----------------------------
+        metadata_score = 0
+
+        if user_occasion and user_occasion in row["occasion"]:
+            metadata_score += 1.5
+
+        if user_mood and user_mood in row["mood"]:
+            metadata_score += 1.0
+
+        if user_color and user_color in row["primary_color"]:
+            metadata_score += 1.0
+
+        if user_color and user_color in row["secondary_color"]:
+            metadata_score += 0.5
+
+        if user_mood and user_mood in row["style"]:
+            metadata_score += 0.5
+
+        # -----------------------------
+        # Final score
+        # CV = 75%, metadata = 25%
+        # -----------------------------
+        final_score = (0.75 * cv_score) + (0.25 * metadata_score)
+
+        final_scores.append(round(final_score, 3))
+        cv_scores.append(round(cv_score, 3))
+        metadata_scores.append(round(metadata_score, 3))
+        brightness_values.append(round(brightness, 2))
+        texture_values.append(round(texture, 2))
+
+    result = df.copy()
+    result["brightness"] = brightness_values
+    result["texture"] = texture_values
+    result["cv_score"] = cv_scores
+    result["metadata_score"] = metadata_scores
+    result["final_score"] = final_scores
+
+    result = result[result["final_score"] > 0]
+    result = result.sort_values(by="final_score", ascending=False)
+
+    return result.head(top_k)
+
+
+# In[7]:
+
+
+# ============================================================
+# 6. Display Recommendation Results
+# ============================================================
+
+def show_recommendations_cv(results):
+    if results.empty:
+        print("No matching saree found.")
+        return
+
+    print("Recommended Sarees:")
+
+    display(results[[
+        "item_id",
+        "primary_color",
+        "secondary_color",
+        "style",
+        "transparency",
+        "occasion",
+        "mood",
+        "brightness",
+        "texture",
+        "cv_score",
+        "metadata_score",
+        "final_score"
+    ]])
+
+    for _, row in results.iterrows():
+        image_path = row["image_main"]
+
+        print("\n-------------------------------------")
+        print("Item ID:", row["item_id"])
+        print("Primary Color:", row["primary_color"])
+        print("Secondary Color:", row["secondary_color"])
+        print("Style:", row["style"])
+        print("Transparency:", row["transparency"])
+        print("Occasion:", row["occasion"])
+        print("Mood:", row["mood"])
+        print("Brightness:", row["brightness"])
+        print("Texture:", row["texture"])
+        print("CV Score:", row["cv_score"])
+        print("Metadata Score:", row["metadata_score"])
+        print("Final Score:", row["final_score"])
+
+        if os.path.exists(image_path):
+            img = Image.open(image_path)
+
+            plt.figure(figsize=(4, 5))
+            plt.imshow(img)
+            plt.axis("off")
+            plt.title(row["item_id"])
+            plt.show()
+        else:
+            print("Image not found:", image_path)
+
+
+# In[8]:
+
+
+# ============================================================
+# 7. Simple GUI Input in Jupyter Notebook
+# ============================================================
+
+# Install ipywidgets if needed
+# Run this once only:
+# !pip install ipywidgets
+
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+occasion_widget = widgets.Dropdown(
+    options=["festive", "wedding", "party", "casual", "formal", "evening"],
+    description="Occasion:"
+)
+
+mood_widget = widgets.Dropdown(
+    options=["bold", "rich", "royal", "glamorous", "elegant", "soft", "calm", "happy", "festive"],
+    description="Mood:"
+)
+
+color_widget = widgets.Text(
+    value="black",
+    description="Color:"
+)
+
+topk_widget = widgets.IntSlider(
+    value=3,
+    min=1,
+    max=5,
+    step=1,
+    description="Top-K:"
+)
+
+button = widgets.Button(
+    description="Recommend Sarees",
+    button_style="success"
+)
+
+output = widgets.Output()
+
+def on_button_clicked(b):
+    with output:
+        clear_output()
+
+        results = recommend_sarees_cv_dominant(
+            user_occasion=occasion_widget.value,
+            user_mood=mood_widget.value,
+            user_color=color_widget.value,
+            top_k=topk_widget.value
+        )
+
+        show_recommendations_cv(results)
+
+button.on_click(on_button_clicked)
+
+display(
+    occasion_widget,
+    mood_widget,
+    color_widget,
+    topk_widget,
+    button,
+    output
+)
+
+
+# In[11]:
+
+
+# ============================================================
+# 8. Top-K Accuracy Evaluation
+# ============================================================
+
+test_cases = [
+    {
+        "occasion": "festive",
+        "mood": "bold",
+        "color": "black",
+        "expected": "saree_005"
+    },
+    {
+        "occasion": "wedding",
+        "mood": "elegant",
+        "color": "white",
+        "expected": "saree_001"
+    },
+    {
+        "occasion": "festive",
+        "mood": "elegant",
+        "color": "blue",
+        "expected": "saree_003"
+    },
+    {
+        "occasion": "wedding",
+        "mood": "rich",
+        "color": "maroon",
+        "expected": "saree_002"
+    },
+    {
+        "occasion": "formal",
+        "mood": "royal",
+        "color": "gold",
+        "expected": "saree_004"
+    }
+]
+
+top_k = 3
+correct = 0
+
+evaluation_results = []
+
+for i, test in enumerate(test_cases):
+    results = recommend_sarees_cv_dominant(
+        user_occasion=test["occasion"],
+        user_mood=test["mood"],
+        user_color=test["color"],
+        top_k=top_k
+    )
+
+    recommended_ids = results["item_id"].tolist()
+    success = test["expected"] in recommended_ids
+
+    if success:
+        correct += 1
+
+    evaluation_results.append({
+        "test_case": i + 1,
+        "occasion": test["occasion"],
+        "mood": test["mood"],
+        "color": test["color"],
+        "expected": test["expected"],
+        "recommended_top_k": recommended_ids,
+        "success": success
+    })
+
+accuracy = (correct / len(test_cases)) * 100
+
+eval_df = pd.DataFrame(evaluation_results)
+
+display(eval_df)
+
+print("\n================================")
+print(f"Top-{top_k} Accuracy: {accuracy:.2f}%")
+print("================================")
+
+
+# In[10]:
+
+
+# ============================================================
+# 9. User Preference Rating Evaluation
+# ============================================================
+
+# These are manual ratings based on visual inspection.
+# 1 = poor match, 5 = excellent match
+
+ratings = [5, 4, 5, 4, 5]
+
+average_rating = sum(ratings) / len(ratings)
+
+print("User Preference Ratings:", ratings)
+print(f"Average User Preference Rating: {average_rating:.2f}/5")
+
+
+# In[ ]:
+
+
+
+
